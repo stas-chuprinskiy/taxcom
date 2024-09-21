@@ -54,3 +54,114 @@ INSERT INTO items (item_uid, item_id, item_name) VALUES
     ...
     (uuid_generate_v4(), 40, 'пїЅпїЅпїЅпїЅпїЅ');
 ```
+
+
+## Бизнес процесс
+
+Основные связанные сущности счета:
+- Контрагенты (поставщик/покупатель)
+- Товары / услуги
+
+Приведу набросок нескольких таблиц:
+
+```sql
+CREATE SCHEMA IF NOT EXISTS myawesomeschema;
+
+
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp" with schema myawesomeschema;
+
+
+-- Таблица контрагентов
+CREATE TABLE myawesomeschema.counterparties (
+    counterparty_uid UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    full_name character varying NOT NULL,
+    abbreviated_name character varying,
+    legal_address character varying NOT NULL,
+    postal_address character varying NOT NULL,
+    contacts jsonb DEFAULT '{}'::jsonb NOT NULL,
+    inn bigint NOT NULL UNIQUE,
+    cat bigint NOT NULL
+)
+
+
+-- Таблица айтемов
+CREATE TABLE myawesomeschema.items (
+    item_uid UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    title character varying NOT NULL,
+    price bigint NOT NULL,
+    descr character varying
+)
+
+
+CREATE TYPE payment_status AS ENUM ('NOT_PAID', 'PARTIALLY_PAID', 'FULLY_PAID');
+CREATE TYPE dispatch_status AS ENUM ('NOT_DISPATCHED', 'PARTIALLY_DISPATCHED', 'FULLY_DISPATCHED');
+
+
+-- Таблица счетов
+CREATE TABLE myawesomeschema.bills (
+    bill_uid UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    bill_number BIGINT NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    buyer_uid UUID NOT NULL REFERENCES myawesomeschema.counterparties (counterparty_uid) ON DELETE RESTRICT,
+    supplier_uid UUID NOT NULL REFERENCES myawesomeschema.counterparties (counterparty_uid) ON DELETE RESTRICT,
+    payment_basis character varying NOT NULL,
+    payment_purpose character varying,
+    payment_status payment_status NOT NULL DEFAULT 'NOT_PAID',
+    dispatch_status dispatch_status NOT NULL default 'NOT_DISPATCHED'
+);
+
+
+-- Таблица связи счета и товара
+CREATE TABLE myawesomeschema.bill_item_set (
+    bill_uid UUID REFERENCES myawesomeschema.bills (bill_uid) ON DELETE RESTRICT,
+    item_uid UUID REFERENCES myawesomeschema.items (item_uid) ON DELETE RESTRICT,
+    amount bigint NOT null,
+    PRIMARY KEY (bill_uid, item_uid)
+);
+
+
+CREATE INDEX items_title_idx ON myawesomeschema.items (title);
+CREATE INDEX bills_bill_number_idx ON myawesomeschema.bills (bill_number);
+```
+
+
+Очевидно, что много чего важного есть еще: банковские счета контрагентов, раздельные каталоги товаров и услуг, связанные отгрузки, оплаты, документы и тд, однако в рамках тестового задания все не охватить. Намерено опускаю owner_id в каждой из таблиц, т.к. в контексте задачи создатель сущности не важен. Об индексах: индексы автоматически генерируются при указании различных констрейнтов, будь то PRIMARY KEY, UNIQUE, REFERENCE. Дополнительны созданы items_title_idx и bills_bill_number_idx. Намерено не были созданы индексы для myawesomeschema.bills.payment_status и myawesomeschema.bills.dispatch_status, т.к. текущая реализация предполагает ENUM с малым кол-вом значений. Также намерено не занимаюсь оптимизацией типов полей, описанием ограничений, например, длин character varying, проверок CHECK >= 0 для price, amount и тд.
+
+
+Примеры запросов, решающих требуемые задачи:
+
+```sql
+-- Создание view (реестра) на последние 20 счетов
+-- если будет важен тип счета, где мы или buyer_uid, или supplier_uid, появится доп условие
+-- также в задаче есть "менеджер", выше писал об опущении owner_uid, на конечный запрос это
+-- концептуально не повлияет, добавится один фильтр по owner_uid
+CREATE VIEW myawesomeschema.recent_bills AS
+	SELECT * 
+	FROM myawesomeschema.bills 
+	ORDER BY created_at DESC, bill_number DESC 
+	LIMIT 20;
+
+
+-- Пример запроса на получение счетов конкретного контрагента по маске в full_name
+SELECT b.*
+FROM
+    myawesomeschema.bills b, myawesomeschema.counterparties c
+WHERE
+    b.buyer_uid = c.counterparty_uid AND c.full_name ilike '%рога и копыта%';
+
+
+-- Пример запроса на получение неоплаченных но полностью отгруженных счетов
+-- при этом считаем, что либо сами периодически ходим в АПИ бухгалтерии, либо
+-- получаем колбеки и актуализируем payment_status и dispatch_status
+SELECT
+    b.*
+FROM
+    myawesomeschema.bills b
+WHERE
+    b.payment_status = 'NOT_PAID' AND b.dispatch_status = 'FULLY_DISPATCHED'
+ORDER BY
+    b.created_at DESC, b.bill_number DESC
+LIMIT 10;
+```
+
+Приводить примеры фильтрации по created_at, supplier_uid и тд не вижу практического смысла, думаю концепт понятен.
